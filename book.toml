@@ -1,0 +1,6 @@
+[book]
+authors = ["schen"]
+language = "en"
+multilingual = false
+src = "src"
+title = "A Marshmallow's Guide to Red Teaming"

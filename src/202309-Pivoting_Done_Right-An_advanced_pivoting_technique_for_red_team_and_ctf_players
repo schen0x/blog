@@ -1,0 +1,144 @@
+# Pivoting Done Right - An advanced pivoting technique for red team and ctf players
+
+- Date: 2023/09/27
+- Author: Schen
+
+## Abstract
+
+This article introduces a pivoting technique that can redirect Network Layer (OSI Layer 3) packets.
+
+- Which means TCP SYN scan (`nmap -sS`) is fully functional, ICMP (`ping`) and UDP (`nbtscan`) inbound/outbound packets are properly relayed, packet logging (`wireshark`) also gets much easier.
+
+- While most other well-known tools/techniques (e.g `sshuttle -v -r [username@]sshserver[:port] <subnets>`) operates on Layer 4 or above, thus intrinsically they can do none of the above.
+
+The technique also has little to no dependencies (only needs `ssh` and `iptables`/`ufw`)
+
+How does it work?
+
+- It use a less known `ssh` (OpenSSH) feature to create P2P tun devices that connect the server and the client; something like a VPN (tun, L3).
+
+Some other notes:
+
+- Requires root access.
+
+- For simplicity, the article assumes client and server both run Linux.
+
+Contribution of this article:
+
+- The technique is nothing new. The author originally found it on [this post by Artem Kondratenko](https://artkond.com/2017/03/23/pivoting-guide/)
+
+- It is great because it solves a few major problems. Despite its effectiveness, however, the author found the technique seems to be little-known. Few documents mentioned it, fewer explained it clearly.
+
+- Thus in this article we explains the technique in detail, and propose a "reverse" variation which can traverse the firewall.
+
+
+## PoC
+
+- The original network topology: kali (`10.10.14.61`), server (`10.10.110.123`); kali wants to access the inet (`172.16.1.0/24`) of the server:
+
+![Original Network Topology](./img/202309-0-0-network_topology_before.png)
+
+- The network topology after using the technique: kali can access the inet (`172.16.1.0/24`) through the new `tun1` device (`10.34.1.2`):
+
+![New Network Topology](./img/202309-0-poc-network_topology_after.png)
+
+
+The result:
+
+- UDP packets are properly relayed (`nbtscan`)
+
+![nbtscan, UDP](./img/202309-0-poc-nbns.png)
+
+- SYN scan are fully functional (`nmap -sS`)
+
+![nmap SYN scan](./img/202309-0-poc-syn.png)
+
+- ICMP packets are properly relayed (`ping`)
+
+![ping, traceroute](./img/202309-0-poc-ping_traceroute.png)
+
+
+## The Technique - L3 Tunnel over SSH
+
+According to SSH(1), `ssh` (OpenSSH), has a feature which can setup "SSH-BASED VIRTUAL PRIVATE NETWORKS"
+
+1. On the server side, modify `/etc/ssh/sshd_config` so that:
+
+![sshd_config](./img/202309-0-0-sshd_config.png)
+
+
+2. Restart the sshd server
+
+```sh
+systemctl restart ssh # on the sever
+```
+
+
+3. On the client, use the `-w` flag as follows:
+
+```sh
+# Run as root on the client
+ssh root@10.10.110.123 -w any
+```
+
+- If success, new `tun` devices will be created on both server and client:
+
+![new tun devices](./img/202309-0-1-tun.png)
+
+
+4. Add L3 routing info to the new `tun` devices
+
+- On the client:
+
+```sh
+ip addr add 10.34.1.2/32 peer 10.34.1.1 dev tun1
+ip link set tun1 up
+```
+
+- On the server:
+
+```sh
+ip addr add 10.34.1.1/32 peer 10.34.1.2 dev tun0
+ip link set tun0 up
+```
+
+- Now, tunnel is connected; on the client `ping 10.34.1.1`, and on the server `ping 10.34.1.2` should both return OK.
+
+
+5. Add route
+
+- On the client:
+
+```sh
+# Add route; but exclude the server ip (used by ssh, to establish the tunnel)
+ip route add 10.10.110.123/32 dev tun0 # server ip goes through original route
+# Since /32 is the smaller scope, for the server ip, /24 or /25 are ignored
+ip route add 10.10.110.0/25 dev tun1 # route all other traffic through the tunnel
+ip route add 10.10.110.128/25 dev tun1 # route all other traffic through the tunnel
+ip route add 172.16.1.0/24 dev tun1 # route all inet traffic through the tunnel
+```
+
+- On the server:
+
+```sh
+# Enable kernel ipv4 forward
+echo 1 > /proc/sys/net/ipv4/ip_forward
+
+# To backup or restore the iptables in a production environment
+# iptables-save > ~/iptables_save.txt
+# iptables-restore < ~/iptables_save.txt
+
+iptables -t nat -A POSTROUTING -s 10.34.1.2 -o eth0 -j MASQUERADE
+```
+
+### The Reverse Version
+
+- Config the `/etc/ssh/sshd_config` on kali
+- Start the connection with `ssh -w` from server to kali
+- Now that the tunnel is established, apply the exact same steps from Step 4 and onwards
+- The drawback is that the `server` has root ssh access to `kali`
+
+
+## Reference
+
+- [A Red Teamer's guide to pivoting, Artem Kondratenko](https://artkond.com/2017/03/23/pivoting-guide/)
